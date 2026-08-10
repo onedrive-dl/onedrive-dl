@@ -1,0 +1,7 @@
+# Personal configuration and downloaded content.
+.env
+.env.*
+!.env.example
+Download/
+*.sharepoint-sync-state.json
+sharepoint-sync.log
