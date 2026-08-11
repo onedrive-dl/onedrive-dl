@@ -5,17 +5,27 @@ from __future__ import annotations
 import argparse
 import http.cookiejar
 import json
+import logging
 import os
 import re
 import shutil
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import HTTPCookieProcessor, Request, build_opener
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s: %(message)s",
+    stream=sys.stderr,
+)
+logger = logging.getLogger("sharepoint-downloader")
 
 STATE_FILE_NAME = ".sharepoint-sync-state.json"
 USER_AGENT = "sharepoint-public-sync/1.0"
@@ -69,7 +79,7 @@ class SharePointClient:
                 if attempt == 3:
                     raise
             delay = 2**attempt
-            print(f"Temporary SharePoint error; retrying in {delay}s...", file=sys.stderr)
+            logger.warning(f"Temporary SharePoint error; retrying in {delay}s...")
             time.sleep(delay)
         raise AssertionError("unreachable")
 
@@ -146,23 +156,51 @@ def load_state(path: Path) -> dict[str, Any]:
         return {}
 
 
-def sync(client: SharePointClient, share_url: str, destination: Path, dry_run: bool, delete_missing: bool) -> None:
+def sync(client: SharePointClient, share_url: str, destination: Path, dry_run: bool, delete_missing: bool, max_threads: int = 4, exclude_patterns: list[str] = None) -> None:
     remote = client.list_files(share_url)
     state_path = destination / STATE_FILE_NAME
     old_state = load_state(state_path)
-    print(f"Source:      {share_url}\nDestination: {destination}\nFound {len(remote)} remote file(s).")
+
+    # Filter remote files based on exclude patterns
+    if exclude_patterns:
+        filtered_remote = {}
+        for rel, item in remote.items():
+            if not any(re.search(pat.replace("*", ".*"), rel) for pat in exclude_patterns):
+                filtered_remote[rel] = item
+        remote = filtered_remote
+
+    logger.info(f"Source:      {share_url}\nDestination: {destination}\nFound {len(remote)} remote file(s).")
+
+    to_download = []
     for relative, item in sorted(remote.items()):
         target = safe_target(destination, relative)
         if target.is_file() and old_state.get(relative, {}).get("etag") == item["etag"]:
-            print(f"unchanged  {relative}")
+            logger.info(f"unchanged  {relative}")
         else:
-            print(f"download   {relative}")
-            if not dry_run:
-                client.download(item["url"], target)
+            to_download.append((relative, item))
+
+    if not dry_run and to_download:
+        logger.info(f"Downloading {len(to_download)} files using {max_threads} threads...")
+        with ThreadPoolExecutor(max_workers=max_threads) as executor:
+            futures = {
+                executor.submit(client.download, item["url"], safe_target(destination, rel)): rel
+                for rel, item in to_download
+            }
+            for future in as_completed(futures):
+                rel = futures[future]
+                try:
+                    future.result()
+                    logger.info(f"downloaded {rel}")
+                except Exception as e:
+                    logger.error(f"failed to download {rel}: {e}")
+    elif dry_run:
+        for rel, _ in to_download:
+            logger.info(f"would download {rel}")
+
     if delete_missing and destination.exists():
         for path in sorted(destination.rglob("*"), reverse=True):
             if path.is_file() and path != state_path and path.relative_to(destination).as_posix() not in remote:
-                print(f"delete     {path.relative_to(destination)}")
+                logger.info(f"delete     {path.relative_to(destination)}")
                 if not dry_run:
                     path.unlink()
         if not dry_run:
@@ -182,6 +220,9 @@ def main() -> None:
     parser.add_argument("--destination", help="override DOWNLOAD_DIR")
     parser.add_argument("--dry-run", action="store_true", help="show changes without writing files")
     parser.add_argument("--no-delete", action="store_true", help="never remove local files for this run")
+    parser.add_argument("--max-size", type=int, help="max total download size in bytes")
+    parser.add_argument("--exclude", action="append", help="glob patterns to exclude (can be used multiple times)")
+    parser.add_argument("--threads", type=int, default=4, help="number of parallel download threads (default: 4)")
     args = parser.parse_args()
     env_path = Path(args.env).expanduser()
     settings = load_env(env_path)
@@ -196,7 +237,16 @@ def main() -> None:
     if timeout < 1:
         raise RuntimeError("TIMEOUT_SECONDS must be a positive integer")
     delete_missing = bool_value(settings.get("MIRROR_DELETE", "true"), "MIRROR_DELETE") and not args.no_delete
-    sync(SharePointClient(timeout), share_url, destination, args.dry_run, delete_missing)
+
+    sync(
+        SharePointClient(timeout),
+        share_url,
+        destination,
+        args.dry_run,
+        delete_missing,
+        max_threads=args.threads,
+        exclude_patterns=args.exclude
+    )
 
 
 if __name__ == "__main__":
