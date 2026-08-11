@@ -1,51 +1,119 @@
-# User Guide: OneDrive/SharePoint CLI Downloader
+# OneDrive & SharePoint Public Folder Sync
 
-This tool allows you to mirror or download the contents of a publicly shared OneDrive or SharePoint folder to your local machine without needing a Microsoft account.
+Mirror a publicly shared OneDrive or SharePoint folder to your computer—no Microsoft account, packages, or browser automation required.
 
-## Quick Start
+> Want a one-time ZIP download instead? Try the [web downloader](https://onedrive-dl.github.io). This repository is the better fit for repeatable local backups and command-line workflows.
 
-### 1. Prerequisites
+## What it does
 
-Ensure you have **Python 3.9+** installed on your system.
+- Downloads every file in a public shared folder, including nested folders.
+- Skips files that have not changed since the previous run.
+- Optionally keeps an exact local mirror by removing files deleted remotely.
+- Supports preview runs, exclusions, configurable timeouts, and parallel downloads.
 
-### 2. Setup
+## Requirements
 
-1. Clone this repository or download the `sharepoint_public_sync.py` script.
-2. Create a `.env` file in the same directory as the script with the following content:
+- Python 3.9 or newer
+- A **public folder** link from OneDrive or SharePoint, shared as **Anyone with the link can view**
+
+No third-party Python dependencies are needed.
+
+## Quick start
+
+1. Download this repository, or save `sharepoint_public_sync.py` and `.env.example` in the same folder.
+2. Create your private configuration file:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+3. Edit `.env` and add the public folder URL:
+
    ```env
-   SHAREPOINT_URL=https://your-public-folder-link-here
-   DOWNLOAD_DIR=./Downloads/MyFolder
+   SHAREPOINT_URL=https://your-public-folder-link
+   DOWNLOAD_DIR=Download
    MIRROR_DELETE=true
    TIMEOUT_SECONDS=90
    ```
 
-### 3. Running the tool
+4. Check the planned changes first:
 
-Run the script using Python:
+   ```bash
+   python3 sharepoint_public_sync.py --dry-run
+   ```
+
+5. Run the sync:
+
+   ```bash
+   python3 sharepoint_public_sync.py
+   ```
+
+Your files are saved to `DOWNLOAD_DIR`. The tool also creates `.sharepoint-sync-state.json` there to remember which files are already current.
+
+## Common commands
 
 ```bash
-python3 sharepoint_public_sync.py
+# Download to a different folder for this run
+python3 sharepoint_public_sync.py --destination ./backups/team-files
+
+# Use a link without creating a .env file
+python3 sharepoint_public_sync.py --url 'https://1drv.ms/f/s!example' --destination ./Download
+
+# Download or update files, but never remove local extras
+python3 sharepoint_public_sync.py --no-delete
+
+# Skip temporary and private files
+python3 sharepoint_public_sync.py --exclude '*.tmp' --exclude 'private*'
+
+# Use more parallel downloads (may increase rate limiting)
+python3 sharepoint_public_sync.py --threads 8
 ```
 
-## Command Line Options
+## Configuration
 
-You can override `.env` settings using command line flags:
+Settings in `.env` provide the defaults; command-line options take precedence.
 
-| Flag                   | Description                                        | Example                                  |
-| :--------------------- | :------------------------------------------------- | :--------------------------------------- |
-| `--url <link>`         | Override the SharePoint URL                        | `--url https://1drv.ms/f/s!...`          |
-| `--destination <path>` | Change where files are saved                       | `--destination ./backup`                 |
-| `--dry-run`            | Show what would happen without downloading         | `--dry-run`                              |
-| `--no-delete`          | Keep local files that were removed from the remote | `--no-delete`                            |
-| `--threads <num>`      | Number of parallel downloads (default: 4)          | `--threads 8`                            |
-| `--exclude <pattern>`  | Skip files matching the glob pattern               | `--exclude "*.tmp" --exclude "private*"` |
+| Setting           | Purpose                                                          | Default    |
+| ----------------- | ---------------------------------------------------------------- | ---------- |
+| `SHAREPOINT_URL`  | Public OneDrive or SharePoint **folder** URL.                    | Required   |
+| `DOWNLOAD_DIR`    | Local destination. Relative paths are based on the `.env` file.  | `Download` |
+| `MIRROR_DELETE`   | `true` keeps an exact mirror; `false` only downloads or updates. | `true`     |
+| `TIMEOUT_SECONDS` | Timeout for each request.                                        | `90`       |
+
+| Option                 | Purpose                                                 |
+| ---------------------- | ------------------------------------------------------- |
+| `--env <path>`         | Use a configuration file other than `.env`.             |
+| `--url <link>`         | Override `SHAREPOINT_URL`.                              |
+| `--destination <path>` | Override `DOWNLOAD_DIR`.                                |
+| `--dry-run`            | List downloads and deletions without changing files.    |
+| `--no-delete`          | Do not remove local files for this run.                 |
+| `--threads <number>`   | Number of parallel downloads; default: `4`.             |
+| `--exclude <pattern>`  | Exclude a pattern; repeat the option for more patterns. |
+
+## Before you sync
+
+`MIRROR_DELETE=true` means the destination is treated as a mirror. Files in that folder that are not in the shared folder may be removed. Use `--dry-run` before the first run, or use `--no-delete` if you only want additive backups.
+
+The `.env` file can contain a private sharing link. Keep it out of version control; the included `.gitignore` is set up for that.
 
 ## Troubleshooting
 
-### "This does not appear to be a public SharePoint folder link"
+**“This does not appear to be a public SharePoint folder link”**
 
-Ensure the link is a **folder** link, not a file link, and that it is shared as "Anyone with the link can view." Test the link in an incognito window; if it asks for a login, it won't work.
+Make sure you shared a folder—not a single file—with “Anyone with the link can view.” Open the link in a private/incognito window: if Microsoft asks you to sign in, the tool cannot access it.
 
-### "Temporary SharePoint error; retrying..."
+**Temporary SharePoint error; retrying**
 
-SharePoint sometimes limits request rates. The tool automatically retries with an exponential backoff. If this persists, try reducing the `--threads` count.
+Microsoft may throttle requests. The tool retries temporary failures automatically. If it continues, lower `--threads` and try again later.
+
+**Nothing is downloaded**
+
+Run with `--dry-run` to see the planned work. Files marked `unchanged` already match the saved sync state.
+
+## For developers
+
+See the [Developer Guide](DEV_GUIDE.md) for the architecture, safety model, and contribution notes.
+
+## License
+
+Released under the [MIT License](LICENSE).

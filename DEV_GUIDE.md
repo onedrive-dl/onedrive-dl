@@ -1,36 +1,49 @@
-# Developer Guide: OneDrive/SharePoint CLI Downloader
+# Developer Guide — CLI Sync
 
-## Architecture
+## Design in one minute
 
-The tool works by scraping the public HTML view of a shared OneDrive/SharePoint folder to extract a temporary `driveUrl` and `driveAccessToken`. It then uses these to interact with the Microsoft Graph-like API provided for public shares.
+The script reads the public HTML page for a shared folder, extracts the temporary drive endpoint and access token Microsoft exposes for that share, then walks the folder through the corresponding API. It uses only the Python standard library.
 
-### Core Components
+```text
+Public folder link → shared-folder metadata → recursive file listing
+                                            → compare local ETags
+                                            → download changed files → save state
+```
 
-- **`SharePointClient`**: Handles HTTP requests, cookie management, and retries. It is designed to be dependency-free, using only `urllib`.
-- **`sync` loop**:
-  1. Fetches remote file metadata recursively.
-  2. Compares remote ETags with a local state file (`.sharepoint-sync-state.json`).
-  3. Downloads only new or changed files using a `ThreadPoolExecutor` for performance.
-  4. (Optional) Removes local files that no longer exist on the remote.
+## Key pieces
 
-## Implementation Details
+| Area                          | Responsibility                                                                             |
+| ----------------------------- | ------------------------------------------------------------------------------------------ |
+| `SharePointClient`            | Requests, cookies, retry/backoff, folder metadata, and downloads.                          |
+| `sync()`                      | Filtering, change detection, parallel downloads, optional deletion, and state persistence. |
+| `safe_target()`               | Ensures remote paths cannot write outside the selected destination.                        |
+| `.sharepoint-sync-state.json` | Stores remote ETags and sizes for incremental syncs.                                       |
 
-### Path Security
+## Local development
 
-To prevent directory traversal attacks (ZipSlip), the tool uses `safe_target()`. This function resolves the final path and ensures it is still contained within the intended destination directory.
+The project has no install step. Create a `.env` from `.env.example`, then safely inspect a real public share:
 
-### Performance
+```bash
+cp .env.example .env
+python3 sharepoint_public_sync.py --dry-run
+```
 
-The tool implements parallel downloads via `concurrent.futures.ThreadPoolExecutor`. The thread count is configurable to balance speed against the risk of being rate-limited (HTTP 429).
+Use a dedicated test destination. A normal run with mirroring enabled can delete local files that are absent from the remote share.
 
-## Contributing
+## Implementation notes
 
-### Development Setup
+- Downloads use `ThreadPoolExecutor`; `--threads` controls concurrency.
+- HTTP `429`, `500`, `502`, `503`, and `504` responses are retried with exponential backoff.
+- Files are written to a temporary sibling file and atomically moved into place after a successful download.
+- Path containment is checked before every write to protect against directory traversal.
 
-1. Create a `.env` file as described in the `USER_GUIDE.md`.
-2. Use `python3 sharepoint_public_sync.py --dry-run` to test metadata fetching without downloading files.
+## Extending the tool
 
-### Adding Features
+- Update public-share parsing in `public_folder_metadata()` if Microsoft changes the shared-folder page.
+- Adjust traversal in `list_files()` for new metadata or pagination behavior.
+- Add filters around the `exclude_patterns` handling in `sync()`.
+- Keep new write paths behind `safe_target()` and preserve the temporary-file download behavior.
 
-- **Filters**: To add new filtering logic, modify the `sync` function's `exclude_patterns` handling.
-- **New API Endpoints**: If Microsoft changes the public share API, updates will likely be needed in `public_folder_metadata` and `list_files`.
+## License
+
+This project is licensed under the [MIT License](LICENSE).
