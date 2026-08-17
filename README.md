@@ -7,7 +7,7 @@ Mirror a publicly shared OneDrive or SharePoint folder to your computer—no Mic
 ## What it does
 
 - Downloads every file in a public shared folder, including nested folders.
-- Skips files that have not changed since the previous run.
+- Downloads only files that are missing, changed remotely, or have a different local size.
 - Optionally keeps an exact local mirror by removing files deleted remotely.
 - Supports preview runs, exclusions, configurable timeouts, and parallel downloads.
 
@@ -48,7 +48,9 @@ No third-party Python dependencies are needed.
    python3 sharepoint_public_sync.py
    ```
 
-Your files are saved to `DOWNLOAD_DIR`. The tool also creates `.sharepoint-sync-state.json` there to remember which files are already current.
+Your files are saved to `DOWNLOAD_DIR`. The tool also creates `.sharepoint-sync-state.json` there to record each downloaded file's SharePoint version marker (eTag, or modification timestamp when an eTag is unavailable).
+
+While a sync is running, the terminal reports when it is fetching the SharePoint file list, checking local files, and completing individual downloads. Messages do not include an `INFO:` prefix.
 
 ## Common commands
 
@@ -108,7 +110,11 @@ Microsoft may throttle requests. The tool retries temporary failures automatical
 
 **Nothing is downloaded**
 
-Run with `--dry-run` to see the planned work. Files marked `unchanged` already match the saved sync state.
+Run with `--dry-run` to see the planned work. Files marked `unchanged` exist locally, match the saved SharePoint version marker, and have the expected size. Missing, changed, or incomplete files are downloaded.
+
+**A local edit was not downloaded again**
+
+The tool detects local edits that change the file size. An edit that preserves the exact same size cannot be detected because the saved version marker describes the SharePoint copy, not the local file's contents. Delete that local file to force a fresh download.
 
 ## For developers
 

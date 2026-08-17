@@ -22,7 +22,7 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(levelname)s: %(message)s",
+    format="%(message)s",
     stream=sys.stderr,
 )
 logger = logging.getLogger("sharepoint-downloader")
@@ -122,7 +122,12 @@ class SharePointClient:
                     download_url = item.get("@content.downloadUrlNoAuth") or item.get("@content.downloadUrl")
                     if not download_url:
                         raise RuntimeError(f"SharePoint did not provide a download URL for {relative}")
-                    files[relative] = {"url": download_url, "etag": item.get("eTag", ""), "size": item.get("size", 0)}
+                    files[relative] = {
+                        "url": download_url,
+                        "etag": item.get("eTag", ""),
+                        "modified": item.get("lastModifiedDateTime", ""),
+                        "size": item.get("size", 0),
+                    }
             if next_link := response.get("@odata.nextLink"):
                 pending.append((parent, next_link))
         return files
@@ -156,7 +161,24 @@ def load_state(path: Path) -> dict[str, Any]:
         return {}
 
 
+def is_current(target: Path, remote_item: dict[str, Any], saved_item: Any) -> bool:
+    """Return whether a local file is the version recorded by SharePoint."""
+    if not target.is_file() or not isinstance(saved_item, dict):
+        return False
+    if target.stat().st_size != remote_item["size"]:
+        return False
+
+    # eTag is the strongest version identifier. Some public SharePoint links do
+    # not expose it, so use the modification timestamp when it is available.
+    if remote_item["etag"]:
+        return saved_item.get("etag") == remote_item["etag"]
+    if remote_item["modified"]:
+        return saved_item.get("modified") == remote_item["modified"]
+    return False
+
+
 def sync(client: SharePointClient, share_url: str, destination: Path, dry_run: bool, delete_missing: bool, max_threads: int = 4, exclude_patterns: list[str] = None) -> None:
+    logger.info("Fetching file list from SharePoint...")
     remote = client.list_files(share_url)
     state_path = destination / STATE_FILE_NAME
     old_state = load_state(state_path)
@@ -169,12 +191,14 @@ def sync(client: SharePointClient, share_url: str, destination: Path, dry_run: b
                 filtered_remote[rel] = item
         remote = filtered_remote
 
-    logger.info(f"Source:      {share_url}\nDestination: {destination}\nFound {len(remote)} remote file(s).")
+    logger.info(f"\nSource:      {share_url}\n\nDestination: {destination}\n\nFound {len(remote)} remote file(s).\n")
+    logger.info("Checking local files for changes...")
 
     to_download = []
+    completed_downloads: set[str] = set()
     for relative, item in sorted(remote.items()):
         target = safe_target(destination, relative)
-        if target.is_file() and old_state.get(relative, {}).get("etag") == item["etag"]:
+        if is_current(target, item, old_state.get(relative)):
             logger.info(f"unchanged  {relative}")
         else:
             to_download.append((relative, item))
@@ -190,6 +214,7 @@ def sync(client: SharePointClient, share_url: str, destination: Path, dry_run: b
                 rel = futures[future]
                 try:
                     future.result()
+                    completed_downloads.add(rel)
                     logger.info(f"downloaded {rel}")
                 except Exception as e:
                     logger.error(f"failed to download {rel}: {e}")
@@ -209,7 +234,14 @@ def sync(client: SharePointClient, share_url: str, destination: Path, dry_run: b
                     path.rmdir()
     if not dry_run:
         destination.mkdir(parents=True, exist_ok=True)
-        compact_state = {path: {"etag": item["etag"], "size": item["size"]} for path, item in remote.items()}
+        # Persist only files that were already verified or downloaded
+        # successfully. A failed transfer must be retried on the next run.
+        compact_state = {
+            relative: {"etag": item["etag"], "modified": item["modified"]}
+            for relative, item in remote.items()
+            if relative in completed_downloads
+            or is_current(safe_target(destination, relative), item, old_state.get(relative))
+        }
         state_path.write_text(json.dumps(compact_state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
